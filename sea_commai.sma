@@ -57,11 +57,16 @@
 * 			Added advanced Armory upgrade for advanded weapons
 * 			Changed Console Variables for readability
 * 			Removed varied resource gains
-* 		Version 1.7.1: Added upgrade animations for buildings
+* 
+* 		Version 1.8: Added upgrade animations for buildings
 * 			Bug fixes
+* 			Balance changes
+* 			Tweaked the spawning effects to match the players dropping the buildings 
+* 			Added a chance to get mines & grenades
+* 			Tweaked the weapon res balance
+* 			Changed how plugin handles building upgrades
 *
 */
-
 
 //CVARS
 #define disabled 0
@@ -79,11 +84,13 @@
 #define bots_only 9
 //alien buff
 #define old 10
+#define gorges_only 11
+#define bot_gorges_only 12
 
 //Base
 /*
 * AI Command mode (amx_commai_comm_mode)
-* disabled, enabled, only weapons
+* disabled, hybrid, only weapons, always
 * hybrid: disabled when human is in command.
 * always: enabled wether or not human is in command.
 */ 
@@ -92,20 +99,22 @@
 /*
 * Resources management system (amx_commai_cost)
 * Makes buildings, upgrades, health, and weapons cost resources
-* disabled, enabled
+* number is multiplication factor
 */
-#define CVAR_BUILDING_COST enabled
+#define CVAR_BUILDING_COST 1.0
+#define CVAR_ELECTRIFY_COST 1.0
+#define CVAR_UPGRADE_COST 1.0
+
+//Hard coded costs
 #define CVAR_RES_COST enabled
-#define CVAR_ELECTRIFY_COST enabled
-#define CVAR_UPGRADE_COST enabled
-#define CVAR_RESUPPLY_COST enabled
-#define CVAR_WEAPONS_COST enabled
+#define CVAR_RESUPPLY_COST 1.0
+#define CVAR_WEAPONS_COST 1.0
 
 /*
-* Automatic Turret Factory Upgrade system (amx_commai_upgrade_tfs)
+* Automatic Turret Factory Upgrade system (amx_commai_upgrade)
 * disabled, enabled
 */
-#define CVAR_UPGRADE_TFS enabled
+#define CVAR_UPGRADE enabled
 
 /*
 * Automatic Electrical Defense systen (amx_commai_electrify_buildings)
@@ -124,6 +133,7 @@
 * disabled, enabled, or bots only
 */
 #define CVAR_WEAPONS enabled
+#define CVAR_WEAPONS_RES_BASE 0.5 //doubled when resupply is enabled
 
 /*
 * Psudo-resupply for NS (amx_commai_resupply)
@@ -131,6 +141,7 @@
 */
 #define CVAR_RESUPPLY enabled
 #define CVAR_RESUPPLY_TIME 5.0
+#define CVAR_RESUPPLY_USE_WEAPON_RES 1
 
 /*
 * Armor regeneration for NS (amx_commai_armor)
@@ -147,7 +158,7 @@
 * disabled, enabled
 * old: resources are added upon death based on hard-coded numbers.
 */
-#define CVAR_ALIEN_BUFF disabled
+#define CVAR_ALIEN_BUFF both
 
 #define CVAR_OLD_1HIVE 30.0
 #define CVAR_OLD_2HIVE 20.0
@@ -175,10 +186,12 @@
 //START PLUGIN
 #include <amxmodx> 
 #include <amxmisc>
-#include <engine>
 #include <fakemeta>
+#include <engine>
 #include <fun>
 #include <ns>
+
+#define VERSION "1.8b Public Test"
 
 //eks dump ent info http://www.amxmodx.org/forums/viewtopic.php?p=46290
 new g_MaxEnts
@@ -218,17 +231,19 @@ new bm_list_cost[25]={0, 20, 20, 15 ,10 ,10, 10, 20, 40, 15, 10, 15, 40, 10}
 
 
 //vote
+new g_ModName[64]
+new roundtime
 new choises[3]
 new player_comm, comm_mode
-new upgrade, bool:upgrading[999], upgrade_cost, Float:armslabOrigin[3]
-new electrify, electrify_mode, electrify_cost
-new resupply, resupply_cost, armor
+new upgrade, bool:upgrading[999], upgradetime[999], upgrade_cost, Float:armslabOrigin[3]
+new electrify, electrify_mode, electrify_cost, elec_TFs, elec_RTs
+new resupply, resupply_cost, resupply_use_wres, armor
 new effects
 new bool:resupplytic, resupply_time, Float:temptime
-new weapons, weapons_cost, Float:weapon_res
+new weapons, weapons_cost, Float:weapon_res, weapon_res_add
 new bool:temp_disable = false
-new bool:spawned_building = false, bool:wait_for_res, Float: spawn_interval, delayfactor
-new building_cost, res_cost, bool: firstTowerBuilt, Float:firstTowerOrigin[3], nozzles
+new bool:spawned_building = false, bool:wait_for_res, Float:spawn_interval, delayfactor
+new building_cost, res_cost, bool:firstTowerBuilt, Float:firstTowerOrigin[3], nozzles
 //Alien buff values
 new alien_buff_mode, buff_1hive, buff_2hive, buff_3hive
 
@@ -237,15 +252,16 @@ public fcvar_string(Float:cvar_num){new tempstring[5];float_to_str(cvar_num,temp
 
 public plugin_init() 
 { 
+	formatex(g_ModName, charsmax(g_ModName), "CommanderAI %s", VERSION)
+	register_forward( FM_GetGameDescription, "GameDesc" )
 	if ( ns_is_combat() )
 	{
-		register_plugin("Commander AI [OFF]", "1.7.1", "CapITanJAC")
+		register_plugin("Commander AI [OFF]", VERSION, "CapITanJAC")
 		pause("ad")
 	} 
 	else 
 	{
-		register_plugin("Commander AI [ON]", "1.7.1", "CapITanJAC")
-		
+		register_plugin("Commander AI [ON]", VERSION, "CapITanJAC")
 		//max
 		g_MaxEnts = get_global_int(GL_maxEntities)
 		
@@ -253,7 +269,7 @@ public plugin_init()
 		new datadir[81]
 		get_datadir(datadir,80)
 		get_mapname(mapname,40)
-		format(g_FileName, 100 , "%s/%s.cmai",datadir,mapname)
+		format(g_FileName, 100 , "%s/commai/%s.cmai",datadir,mapname)
 		
 		cvar_init()
 		load_buildings()
@@ -262,6 +278,7 @@ public plugin_init()
 		//Tasks
 		temptime = get_pcvar_float(resupply_time)
 		//set_task_ex(120.0, "reset_plugin",_,_,_,SetTask_Repeat)
+		set_task_ex(1.0, "round_tick",_,_,_, SetTask_Repeat)
 		set_task_ex(temptime / 2, "player_spread", 6,_,_, SetTask_Repeat) // Noshadow
 		set_task_ex(10.0, "cvar_check",_,_,_, SetTask_Repeat)
 		set_task(1.0, "do_build")
@@ -281,18 +298,20 @@ cvar_init()
 {
 	player_comm = register_cvar("amx_commai_comm_status", "0") // *NOTE Can change during gameplay this is because comm_mode is 1 (1:building spawn is disabled)."
 	comm_mode = register_cvar("amx_commai_comm_mode", cvar_string(CVAR_COMM_MODE))
-	building_cost = register_cvar("amx_commai_cost", cvar_string(CVAR_BUILDING_COST))
+	building_cost = register_cvar("amx_commai_cost", fcvar_string(CVAR_BUILDING_COST))
 	res_cost = register_cvar("amx_commai_res_cost", cvar_string(CVAR_RES_COST))
-	electrify_cost = register_cvar("amx_commai_electrify_cost", cvar_string(CVAR_ELECTRIFY_COST))
-	upgrade_cost = register_cvar("amx_commai_upgrade_cost", cvar_string(CVAR_UPGRADE_COST))
-	resupply_cost = register_cvar("amx_commai_resupply_cost", cvar_string(CVAR_RESUPPLY_COST))
-	weapons_cost = register_cvar("amx_commai_weapons_cost", cvar_string(CVAR_WEAPONS_COST))
-	upgrade = register_cvar("amx_commai_upgrade_tfs", cvar_string(CVAR_UPGRADE_TFS))
+	electrify_cost = register_cvar("amx_commai_electrify_cost", fcvar_string(CVAR_ELECTRIFY_COST))
+	upgrade_cost = register_cvar("amx_commai_upgrade_cost", fcvar_string(CVAR_UPGRADE_COST))
+	resupply_cost = register_cvar("amx_commai_resupply_cost", fcvar_string(CVAR_RESUPPLY_COST))
+	weapons_cost = register_cvar("amx_commai_weapons_cost", fcvar_string(CVAR_WEAPONS_COST))
+	weapon_res_add = register_cvar("amx_commai_weapons_res_base", fcvar_string(CVAR_WEAPONS_RES_BASE))
+	upgrade = register_cvar("amx_commai_upgrade", cvar_string(CVAR_UPGRADE))
 	electrify = register_cvar("amx_commai_electrify_buildings", cvar_string(CVAR_ELECTRIFY_BUILDINGS))
 	electrify_mode = register_cvar("amx_commai_electrify_mode", cvar_string(CVAR_ELECTRIFY_MODE))
 	weapons = register_cvar("amx_commai_weapons", cvar_string(CVAR_WEAPONS))
 	resupply = register_cvar("amx_commai_resupply", cvar_string(CVAR_RESUPPLY))
 	resupply_time = register_cvar("amx_commai_resupply_time", fcvar_string(CVAR_RESUPPLY_TIME))
+	resupply_use_wres = register_cvar("amx_commai_resupply_use_weapon_res", cvar_string(CVAR_RESUPPLY_USE_WEAPON_RES))
 	armor = register_cvar("amx_commai_armor", cvar_string(CVAR_ARMOR))
 	alien_buff_mode = register_cvar("amx_commai_alien_buff_mode", cvar_string(CVAR_ALIEN_BUFF))
 	buff_1hive = register_cvar("amx_commai_alien_buff_1hive_ammount", fcvar_string(CVAR_OLD_1HIVE))
@@ -308,18 +327,18 @@ cvar_init()
 
 public round_start()
 {
+	//roundinprogress = true
 	firstTowerBuilt = true
 	ns_set_teamres(1,0.0)
 	weapon_res = 10.0
+	roundtime = 0
 	entity_get_vector(ns_get_build("resourcetower",1,1), EV_VEC_origin, firstTowerOrigin)
 	set_task(10.0, "start_vote");
 	set_task_ex(4.0, "tick", 3, _, _, SetTask_Repeat)
 	set_task_ex(0.1, "message_display", 25, _, _, SetTask_Repeat)
 	set_task_ex(0.1, "res_add",_,_,_, SetTask_RepeatTimes, 250)
-	set_task_ex(15.0, "upgrade_tf", 101,_,_, SetTask_Repeat)
-	set_task_ex(150.0, "upgrade_armory", 102,_,_, SetTask_Repeat)
-	set_task_ex(30.0, "do_electricity", 103,_,_, SetTask_Repeat)
-	
+	set_task_ex(1.0, "do_upgrade", 101,_,_, SetTask_Repeat)
+	set_task_ex(30.0, "do_electricity", 102,_,_, SetTask_Repeat)
 }
 
 public cvar_check()
@@ -349,8 +368,7 @@ public reset_plugin(id,level,cid)
 	wait_for_res = false
 	spawn_interval = 0.0
 	restart_resupply()
-	set_task_ex(30.0, "upgrade_tf")
-	set_task_ex(300.0, "upgrade_armory")
+	set_task_ex(30.0, "do_upgrade")
 	set_task_ex(60.0, "do_electricity")
 	console_print(id,"[AMXX] CommAI - Restarted")
 	return PLUGIN_HANDLED
@@ -358,12 +376,16 @@ public reset_plugin(id,level,cid)
 
 public round_end()
 {
+	//roundinprogress = false
+	roundtime = 0
 	remove_task(3)
 	remove_task(25)
 	remove_task(101)
 	remove_task(102)
-	remove_task(103)
 }
+
+public round_tick()
+{roundtime++;}
 
 public tick()
 {
@@ -373,71 +395,81 @@ public tick()
 
 public res_tick()
 {
-	
 	if(!is_blocked2(firstTowerOrigin))
 		firstTowerBuilt = false
-	new tfs = ns_get_build("resourcetower",1)
+	
+	new Float:tfs 
+	tfs += ns_get_build("resourcetower",1)
 	if(firstTowerBuilt)
-		tfs--
-	if(get_pcvar_num(building_cost) == enabled)
 	{
-		/*if(ns_get_teamres(1) >= 100.0)
-		{
-			new i
-			if(!firstTowerBuilt)
-				res_add()
-			else
-				if(weapon_res > 100.0)
-					weapon_res ++
-				else
-					while(weapon_res < 100.0 || i <= tfs)
-					{
-						weapon_res += 0.1
-						i ++
-					}
-			
-		}
-		else
-		{*/
-			for(new i;i<tfs;i++)
-			{
-				if(get_pcvar_num(resupply_cost) == 1)
-				{
-					new id, marines
-					for (id = 0; id < get_maxplayers(); id++)
-					{
-						if(!is_user_connected(id) || get_team(id) != 1)
-							continue
-						marines ++
-					}
-					new Float:reslimit = (10.0 * marines) + (10.0 * ns_get_build("team_resourcetower")) + (10.0 * comms())
-					for(new i; i < marines; i++)
-						if(weapon_res >= 50.0 && weapon_res <= reslimit)
-							weapon_res += 0.1
-						else if(weapon_res < 50.0)
-							weapon_res += 0.5
-				}
-				else
-					weapon_res += 0.1
-			
-				set_task(4.0/tfs*i,"res_add")
-			}
-		//}
-	}	
+		tfs--
+		weapon_res += get_pcvar_float(weapon_res_add)
+		if(get_pcvar_bool(resupply_cost))//doubled for resupply
+			weapon_res += get_pcvar_float(weapon_res_add)
+	}
+	else
+	{
+		weapon_res += get_pcvar_float(weapon_res_add)
+		if(get_pcvar_bool(resupply_cost))//doubled for resupply
+			weapon_res += get_pcvar_float(weapon_res_add)
+	}
+	if(get_pcvar_float(building_cost) > 0.0)
+		for(new i;i<tfs;i++)
+			set_task(4.0/tfs*i,"res_add")
+	new Float:marines; marines += (get_playersnum()/2)
+	//0.01 bonus weapon res every 4 seconds per marine (if under 100)
+	if(weapon_res <= 100.0 && !get_pcvar_bool(resupply_cost))
+		weapon_res += (0.01 * floatround(marines))
+	if(get_pcvar_num(player_comm))
+		return
+	if(roundtime >= 1800)
+		set_pcvar_num(electrify_mode, all)
+	else
+		set_pcvar_num(electrify_mode, CVAR_ELECTRIFY_MODE)
+	if(roundtime >= 3600)
+		set_pcvar_num(electrify, all)
+	else
+		set_pcvar_num(electrify, CVAR_ELECTRIFY_BUILDINGS)
 }
 public res_add()
 {
-	ns_add_teamres(1,1.0)
-	
-	//Weapon res taken care of below
-	if(get_pcvar_num(weapons) > 0)
-		weapon_res += 0.1
+	if(get_pcvar_num(weapons) && !get_pcvar_num(player_comm) && roundtime >= 25)
+	{
+		//The minimum ammount of Weapon res to keep at all times, 10 for every portal (after 50 team res).
+		new weaponMultiplier = ns_get_build("team_infportal",1)
+		
+		new Float:halfNozzles 
+		halfNozzles += nozzles
+		halfNozzles /= 2
+		
+		if(get_pcvar_bool(resupply_cost))
+			weaponMultiplier ++
+		if
+		(
+			weapon_res < 10.0 * weaponMultiplier && ns_get_teamres(1) > 50.0
+			|| !get_pcvar_bool(resupply_cost) && ns_get_teamres(1) > (weapon_res * 2)
+			|| ns_get_teamres(1) - (10.0 * floatround(halfNozzles, floatround_floor)) > weapon_res
+		)
+		{
+			weapon_res += get_pcvar_float(weapon_res_add)
+			if(get_pcvar_bool(resupply_cost))//doubled for resupply
+				weapon_res += get_pcvar_float(weapon_res_add)
+		}
+		else
+		{
+			weapon_res += (get_pcvar_float(weapon_res_add) / 2)
+			ns_add_teamres(1,1.0)
+		}
+	}
+	else
+		ns_add_teamres(1,1.0)
 }
-public res_subtract(amount)
+public res_subtract(Float:amount)
 {
 	if(free_res())
 		return
 	new i
+	floatround(amount)
 	if(amount == ns_get_teamres(1))
 		ns_set_teamres(1, 0.0)
 	if(amount > 0)
@@ -456,7 +488,7 @@ public res_subtract(amount)
 public bool:free_res()
 {
 	new rts = ns_get_build("resourcetower",1)
-	if(rts >= nozzles && get_pcvar_num(building_cost) == enabled)
+	if(rts >= nozzles && get_pcvar_float(building_cost) > 0.0)
 		return true
 	else
 		return false
@@ -475,7 +507,8 @@ public do_build()
 	
 	if ((get_pcvar_num(player_comm) == 1 && get_pcvar_num(comm_mode) == hybrid) || get_pcvar_num(comm_mode) == weapons_only)
 		return
-				
+	//if (!ns_round_in_progress())
+		//return
 	//PRIORITIZE RES TOWERS / TURRET FACTORIES / EVERYTHING ELSE.
 	new i = -1
 	new Float:torigin[3]
@@ -486,14 +519,15 @@ public do_build()
 		entity_get_vector(i, EV_VEC_origin, torigin)
 		if(is_blocked2(torigin))
 			continue
-		if(num_friends_in_radius(1,torigin,450) < 1 || num_enemies_in_radius(1,torigin,450) > 0 )
+		//if(num_friends_in_radius(1,torigin,450) < 1 || num_enemies_in_radius(1,torigin,450) > 0 )
+		if(	num_enemies_in_radius(1,torigin,450) > num_friends_in_radius(1,torigin,450) || !num_friends_in_radius(1,torigin,450))
 			continue
-		if(get_pcvar_num(res_cost) == 1)
+		if(get_pcvar_num(res_cost))
 		{
-			if(ns_get_teamres(1) >= 15)
+			if(ns_get_teamres(1) >= 15 * get_pcvar_float(building_cost))
 			{
 				wait_for_res = false
-				res_subtract(15)
+				res_subtract(15.0 * get_pcvar_float(building_cost))
 				spawn_building("resourcetower",1,torigin)
 				return
 			}
@@ -506,10 +540,6 @@ public do_build()
 		else
 			break
 	}
-	//Res reserve check
-	if(comms() > 1)
-		if(ns_get_teamres(1) < (30.0) * (comms() -1))
-			return
 	spawned_building = false
 	for(new i=0;i<STORE_MAX;i++)
 	{
@@ -524,11 +554,14 @@ public do_build()
 					continue
 				
 				//Enemy check.
-				if(num_friends_in_radius(1,g_buildingsf[i],450) < 1 || num_enemies_in_radius(1,g_buildingsf[i],450) > 0 )
+				//if(num_friends_in_radius(1,g_buildingsf[i],450) < 1 || num_enemies_in_radius(1,g_buildingsf[i],450) > 0 )
+				if(	num_enemies_in_radius(1,g_buildingsf[i],450) > num_friends_in_radius(1,g_buildingsf[i],450) || !num_friends_in_radius(1,g_buildingsf[i],450))
 					continue
 				
-				//Command center IP radius check
-				if(g_buildings[i] == 2 && (num_built_in_radius("team_command",g_buildingsf[i],400) < 1 ))
+				//Command center IP, and armory radius check
+				if(g_buildings[i] == 26 && (num_built_in_radius("team_command",g_buildingsf[i],400) < 1 )
+				|| g_buildings[i] == 12 && (num_built_in_radius("team_command",g_buildingsf[i],400) < 1 )
+				|| g_buildings[i] == 2 && (num_built_in_radius("team_command",g_buildingsf[i],400) < 1 ))
 					continue
 				
 				//Proto Check
@@ -547,29 +580,29 @@ public do_build()
 				if (!tech_tree(g_buildings[i]))
 					continue
 					
-				//Adv. TF fix spawn.
-				if(equali("team_advturretfactory",bm_list[g_buildings[i]]))
+				//Spawn adv. TFs no matter what
+				if(equali("team_advturretfactory",bm_list[g_buildings[i]]) || equali("team_turretfactory",bm_list[g_buildings[i]]))
 				{
-					if(ns_get_teamres(1) >=  10.0 || get_pcvar_num(building_cost) == 0 || free_res())
+					if(ns_get_teamres(1) >=  25.0 * get_pcvar_float(building_cost) || !get_pcvar_num(building_cost) || free_res())
 					{
 						spawn_building("team_turretfactory",1,g_buildingsf[i])
 						spawned_building = true
-						if(get_pcvar_num(building_cost) > 0)
-							res_subtract(10)
+						if(get_pcvar_num(building_cost))
+							res_subtract(26.0 * get_pcvar_float(building_cost))
 					}
 					else
 						continue
 				}
 				else // Standard building spawn
 				{
-					if(ns_get_teamres(1) >= bm_list_cost[g_buildings[i]] || get_pcvar_num(building_cost) == 0 || free_res())
+					if(ns_get_teamres(1) >= bm_list_cost[g_buildings[i]] * get_pcvar_float(building_cost) || !get_pcvar_num(building_cost) || free_res())
 					{
 						if( g_buildings[i] == 7 && armslabOrigin[0] == 0)
 							armslabOrigin = g_buildingsf[i]
 						spawn_building(bm_list[g_buildings[i]],1,g_buildingsf[i])
 						spawned_building = true
 						if(get_pcvar_num(building_cost) > 0)
-							res_subtract(bm_list_cost[g_buildings[i]])
+							res_subtract(bm_list_cost[g_buildings[i]] * get_pcvar_float(building_cost))
 					}
 					else
 						continue		
@@ -606,7 +639,7 @@ public bool:tech_tree(name)
 			{//Arms Lab
 				if(name == 7)
 					return true
-				if(ns_get_build("team_armslab") !=0)
+				if(ns_get_build("team_armslab") !=0 && ns_get_build("team_advarmory") !=0)
 				{
 					//Prototype Lab
 					if(name == 8)
@@ -628,110 +661,110 @@ public bool:tech_tree(name)
 
 public upgrade_tf()
 {
-	if (get_pcvar_num(upgrade) == disabled && ns_round_in_progress())
-		return
-	else
-		if(!ns_round_in_progress())
-			return
-	
-	//Adv. TF Upgrade
-	new tfs = ns_get_build("team_turretfactory", 0)
-	new ptr, classname[32]
-	new id = find_ent_by_class(random_num(0,tfs+1), "team_turretfactory")
-	pev(id, pev_classname, ptr, classname, 31)
-	if(equali(classname, "team_turretfactory"))
+	new i, tf, tfs, classname[32]
+	tfs = ns_get_build("team_turretfactory")
+	for(i = 1; tf <= tfs; i++)
 	{
-		if (pev(id, pev_fuser1 ) < 1000)// Hack to check for fully built, adv. TFs seem to always be built.
-			return
-		if(!upgrading[id])
+		tf = ns_get_build("team_turretfactory", 1, i)
+		entity_get_string(tf, EV_SZ_classname, classname, 31)
+		if(equali(classname, "team_turretfactory"))
 		{
-			Util_PlayAnimation(id, 4, 2.5)
-			upgrading[id]=true
-			return
-		}	
-		else
-		{
-			
-		if(get_pcvar_num(upgrade_cost) == 1 && !free_res())
-			if(ns_get_teamres(1) < 30.0)
-				return
-			else
-				res_subtract(30)
-		if(get_pcvar_num(effects))
-			emit_sound(id,CHAN_AUTO,"misc/b_marine_deploy.wav",VOL_NORM,ATTN_NORM,0,PITCH_NORM)
-		set_pev(id,pev_classname,"team_advturretfactory")
-		set_pev(id,pev_iuser3,49) // 49 is the iuser3 for adv. tf.
-		Util_PlayAnimation(id, 3, 1.16)
+			if (entity_get_float(tf, EV_FL_fuser1) < 1000)// Hack to check for fully built, adv. TFs seem to always be built.
+				continue
+			entity_set_string(tf, EV_SZ_classname, "team_advturretfactory")
+			entity_set_int(tf,EV_INT_iuser3, 49)// 49 is the iuser3 for adv. tf.
 		}
+		tf++
 	}
 }
 
 public upgrade_armory()
 {
-	if (get_pcvar_num(upgrade) == disabled && ns_round_in_progress())
-		return
-	else
-		if(!ns_round_in_progress())
-			return
-		
-	new ptr, classname[32]
+	new classname[32]
 	new id = find_ent_by_class(0, "team_armory")
-	pev(id, pev_classname, ptr, classname, 31)
+	entity_get_string(id,EV_SZ_classname, classname, 31)
 	if(!equali(classname, "team_advarmory"))
 	{
-		if (pev(id, pev_fuser1 ) < 1000)// Hack to check for fully built, adv. Armories seem to always be built.
+		if (entity_get_float(id, EV_FL_fuser1) < 1000)// Hack to check for fully built, adv. Armories seem to always be built.
 			return
-		if(get_pcvar_num(upgrade_cost) == 1 && !free_res())
+		if(get_pcvar_num(upgrade_cost) && !free_res())
 			if(!upgrading[id])
 			{
 				Util_PlayAnimation(id, 5, 1.44)
-				upgrading[id]=true
+				upgrading[id] = true
+				upgradetime[id] = roundtime + 160
 				return
 			}	
 			else
 			{
-				if(ns_get_teamres(1) <= 30.0 && upgrading[id])
+				if(ns_get_teamres(1) <= 30.0 * get_pcvar_float(upgrade_cost) && roundtime < upgradetime[id])
 					return	
 				else
-					res_subtract(30)
+					res_subtract(30 * get_pcvar_float(upgrade_cost))
 			}
-		set_pev(id,pev_classname,"team_advarmory")
-		set_pev(id,pev_iuser3,26) // 26 is the iuser3 for adv. ar
-	
-		//Plays upgrade animation
-		Util_PlayAnimation(id, 4, 1.75)
-		if(get_pcvar_num(effects))
-			emit_sound(id,CHAN_AUTO,"misc/b_marine_deploy.wav",VOL_NORM,ATTN_NORM,0,PITCH_NORM)
+		if(upgrading[id] && roundtime < upgradetime[id])
+			return
+		else
+			if(upgrading[id])
+			{
+				upgrading[id] = false
+				entity_set_string(id, EV_SZ_classname, "team_advarmory")
+				entity_set_int(id,EV_INT_iuser3, 26)// 49 is the iuser3 for adv. ar
+			
+				//Plays upgrade animation
+				Util_PlayAnimation(id, 4, 1.75)
+				if(get_pcvar_num(effects))
+					emit_sound(id,CHAN_AUTO,"misc/b_marine_deploy.wav",VOL_NORM,ATTN_NORM,0,PITCH_NORM)
+			}
 	}
+}
+
+public do_upgrade()
+{
+	if (get_pcvar_num(upgrade) == disabled && ns_round_in_progress() || !ns_round_in_progress())
+		return
+		
+	if(roundtime >= 500)
+		upgrade_armory()
+	
+	upgrade_tf()
 }
 
 public electricity(bool:one)
 {
 	if(one)
-		if(ns_get_teamres(1) < 30.0 && get_pcvar_num(electrify_cost) || free_res())
+		if(ns_get_teamres(1) < 30.0 * get_pcvar_float(electrify_cost) && get_pcvar_float(electrify_cost) > 0.0 && !free_res())
 			return
 	new id, dec = get_pcvar_num(electrify)
 	if(get_pcvar_num(electrify) == both)
 		dec = random_num(RTs, TFs)
+	if(elec_RTs >= ns_get_build("resourcetower"))
+		dec = TFs
 	if(dec == RTs)
 	{
 		//For RTs
 		if(get_pcvar_num(electrify) == RTs || get_pcvar_num(electrify) == both)
 		{
-			new rt, rts = ns_get_build("resourcetower",1)
-			for(rt = random_num(0,rts); rt<=rts;rt++)
+			new rt, rts = ns_get_build("resourcetower")
+			for(rt = random_num(0,rts+1); rt<=rts;rt++)
 			{
+				if(elec_RTs >= rts && one)
+					break
+				if(rt == rts && one)//Keep checking until found
+					rt = random_num(0,rts+1)
 				id = ns_get_build("resourcetower",1,rt)
-				if(ns_get_mask(id, MASK_ELECTRICITY) || pev(id, pev_fuser1 ) != 1000)
+				entity_get_float(id, EV_FL_fuser1)
+				if(ns_get_mask(id, MASK_ELECTRICITY) || entity_get_float(id, EV_FL_fuser1) != 1000)
 					continue
-				if (get_pcvar_num(electrify_cost))
-					if(ns_get_teamres(1) >= 30.0 || free_res())
+				if (get_pcvar_float(electrify_cost))
+					if(ns_get_teamres(1) >= 30.0 * get_pcvar_float(electrify_cost) || free_res())
 					{
 						ns_set_mask(id, MASK_ELECTRICITY, 1)
 						if(!free_res())
-							res_subtract(30)
+							res_subtract(30 * get_pcvar_float(electrify_cost))
 						if(get_pcvar_num(effects))
 							emit_sound(id,CHAN_AUTO,"misc/connect.wav",VOL_NORM,ATTN_NORM,0,PITCH_NORM)
+						elec_RTs++
 						if(one)
 							break
 					}
@@ -754,20 +787,25 @@ public electricity(bool:one)
 		if(get_pcvar_num(electrify) == TFs || get_pcvar_num(electrify) == both)
 		{
 			new tf, tfs = ns_get_build("team_advturretfactory",1)
-			for(tf = random_num(0,tfs); tf<=tfs;tf++)
+			for(tf = random_num(0,tfs+1); tf<=tfs;tf++)
 			{
+				if(elec_TFs >= tfs && one)
+					break
+				if(tf == tfs && one)//Keep checking until found
+					tf = random_num(0,tfs+1)
 				id = ns_get_build("team_advturretfactory",1,tf)
 				
-				if(ns_get_mask(id, MASK_ELECTRICITY) || pev(id, pev_fuser1 ) != 1000 )
+				if(ns_get_mask(id, MASK_ELECTRICITY) || entity_get_float(id, EV_FL_fuser1) != 1000 )
 					continue
 				if (get_pcvar_num(electrify_cost))
-					if(ns_get_teamres(1) >= 30.0 || free_res())
+					if(ns_get_teamres(1) >= 30.0 * get_pcvar_float(electrify_cost) || free_res())
 					{
 						ns_set_mask(id, MASK_ELECTRICITY, 1)
 						if(!free_res())
-							res_subtract(30)
+							res_subtract(30 * get_pcvar_float(electrify_cost))
 						if(get_pcvar_num(effects))
 							emit_sound(id,CHAN_AUTO,"misc/connect.wav",VOL_NORM,ATTN_NORM,0,PITCH_NORM)
+						elec_TFs++
 						if(one)
 							break
 					}
@@ -786,7 +824,7 @@ public electricity(bool:one)
 	}
 	if(dec == all)// For shits and giggles
 	{
-		if(ns_get_teamres(1) < 30.0 && get_pcvar_num(electrify_cost) && !free_res())
+		if(ns_get_teamres(1) < 30.0 && get_pcvar_float(electrify_cost) > 0.0 && !free_res())
 			return
 		
 		new id =-1, blds[13] 
@@ -795,24 +833,24 @@ public electricity(bool:one)
 			new ii
 			
 			if(get_pcvar_num(electrify_cost))
-				ii = random_num(0,12)
+				ii = random_num(0,sizeof(bm_list))
 		
-			for(new i = ii;i<=12; i++)// Ran once for every building category
+			for(new i = ii;i<sizeof(bm_list)-1; i++)// Ran once for every building category
 			{
 				blds[i] = ns_get_build(bm_list[i])//Finds the total number of buildings per catagory.
 				new xx
-				if(get_pcvar_num(electrify_cost))
+				if(get_pcvar_float(electrify_cost) > 0.0)
 					xx = random_num(0,blds[i])
 				for(new x = xx;x<=blds[i];x++)// Ran once for every building in category
 				{
 					// Ran once for every building	
 					id = ns_get_build(bm_list[i], 1, x)
-					if(ns_get_mask(id, MASK_ELECTRICITY) || ns_get_teamres(1) < 30.0 && get_pcvar_num(electrify_cost)) 
+					if(ns_get_mask(id, MASK_ELECTRICITY) || ns_get_teamres(1) < 30.0 * get_pcvar_float(electrify_cost) && get_pcvar_num(electrify_cost)) 
 						continue
 					
 					ns_set_mask(id, MASK_ELECTRICITY, 1)
-					if( get_pcvar_num(electrify_cost) && !free_res())
-						res_subtract(30)
+					if( get_pcvar_float(electrify_cost) > 0.0 && !free_res())
+						res_subtract(30 * get_pcvar_float(electrify_cost))
 					if(get_pcvar_num(effects))
 						emit_sound(id,CHAN_AUTO,"misc/connect.wav",VOL_NORM,ATTN_NORM,0,PITCH_NORM)
 				}
@@ -821,17 +859,17 @@ public electricity(bool:one)
 		else
 		{
 			new i, x
-			i = random_num(0,12)
+			i = random_num(0,sizeof(bm_list))
 			blds[i] = ns_get_build(bm_list[i])//Finds the total number of buildings per catagory.
 			x = random_num(0,blds[i])
 			id = ns_get_build(bm_list[i], 1, x)
-			if(ns_get_mask(id, MASK_ELECTRICITY) || ns_get_teamres(1) < 30.0 && get_pcvar_num(electrify_cost))
+			if(ns_get_mask(id, MASK_ELECTRICITY) || ns_get_teamres(1) < 30.0 && get_pcvar_float(electrify_cost) > 0.0 && !free_res())
 				return
 			ns_set_mask(id, MASK_ELECTRICITY, 1)
-			if(get_pcvar_num(electrify_cost) && !free_res())
-				res_subtract(30)
+			if(get_pcvar_float(electrify_cost) > 0.0 && !free_res())
+				res_subtract(30 * get_pcvar_float(electrify_cost))
 			if(get_pcvar_num(effects))
-					emit_sound(id,CHAN_AUTO,"misc/connect.wav",VOL_NORM,ATTN_NORM,0,PITCH_NORM)
+				emit_sound(id,CHAN_AUTO,"misc/connect.wav",VOL_NORM,ATTN_NORM,0,PITCH_NORM)
 		}
 	}
 }
@@ -839,7 +877,7 @@ public electricity(bool:one)
 public do_electricity()
 {
 	//Res reserve check if "all selected"
-	if(ns_get_teamres(1) <= 50.0 && get_pcvar_num(electrify_cost) && get_pcvar_num(electrify_mode) == all || free_res() && get_pcvar_num(electrify_mode) == all || get_pcvar_num(electrify) == 0)
+	if(ns_get_teamres(1) <= 50.0 && get_pcvar_float(electrify_cost) > 0.0 && get_pcvar_num(electrify_mode) == all && !free_res() || get_pcvar_num(electrify) == 0)
 		return
 	if(get_pcvar_num(electrify_mode) != all)
 		electricity(true)
@@ -849,7 +887,7 @@ public do_electricity()
 
 public player_spread()
 {
-	if(!get_pcvar_num(resupply) || get_pcvar_num(comm_mode) == 3 && get_pcvar_num(player_comm))
+	if(!get_pcvar_num(resupply) || get_pcvar_num(comm_mode) == hybrid && get_pcvar_num(player_comm))
 		return
 	new bool:resupply
 	if(resupplytic)
@@ -876,16 +914,15 @@ public do_resupply(index)
 {
 	new Float:temphp
 	new Float:origin[3]
-	if( (!is_user_alive(index)) || (get_team(index) != 1)  || ns_get_build("team_infportal") == 0 || ns_get_build("team_advarmory") + ns_get_build("team_armory") == 0)
+	if( (!is_user_alive(index)) || (get_team(index) != 1)  || !ns_get_build("team_infportal") || !(ns_get_build("team_advarmory") + ns_get_build("team_armory")))
 		return
 	
 	if(ns_get_mask(index,MASK_DIGESTING) || ns_get_mask(index, MASK_TOPDOWN))
 		return // Player is being digested, or commander dont give a anything..
-
-	pev(index, pev_health, temphp)
+	entity_get_vector(index, EV_VEC_origin,origin)
+	temphp = entity_get_float(index, EV_FL_health)
 	if(temphp <= 99.0) 
 	{
-		entity_get_vector(index, EV_VEC_origin,origin)
 		supply(0, origin)
 		return
 	}
@@ -893,10 +930,10 @@ public do_resupply(index)
 	{
 		//Give ammo code by Noshadow
 		//Give ammo as needed, similiar to combat resupply
-		new userweap 
-		new ammo
-		entity_get_vector(index, EV_VEC_origin,origin)
-		userweap = get_user_weapon(index)
+		new userweap, ammo, playerAmmo, playerClip
+		userweap = get_user_weapon(index, playerClip, playerAmmo)
+		if(!userweap || userweap == WEAPON_NONE)
+			return
 		switch(userweap)
 		{
 			case WEAPON_PISTOL:ammo = 10
@@ -904,11 +941,12 @@ public do_resupply(index)
 			case WEAPON_SHOTGUN:ammo = 8
 			case WEAPON_HMG:ammo = 125
 			case WEAPON_GRENADE_GUN: ammo = 8
-			default: ammo = -1
 		}
-		if ( ns_get_weap_reserve(index, userweap) <= ammo )
+		if(!ammo)
+			return
+		if ( playerAmmo <= ammo)
 			supply(1, origin)
-		if ( ns_get_weap_reserve(index, userweap) <= ammo * 2 && userweap != WEAPON_HMG)
+		if ( playerAmmo < ammo * 2 && userweap != WEAPON_HMG)
 			if(random_num(0,1) == 1)
 				supply(1, origin)		
 		
@@ -925,23 +963,36 @@ public do_resupply(index)
 	}
 	return
 }
-
+/*public hook_ammo(index)
+{
+	if(!is_user_bot(index))
+		return
+	new Float:origin[3]
+}*/
 public do_armor(index)
 {	
-	if( !get_pcvar_num(armor) || ns_get_build("team_infportal") == 0 ||ns_get_build("team_advarmory") + ns_get_build("team_armory") == 0 || ns_get_build("team_armslab") == 0)
+	if( !get_pcvar_num(armor) || !ns_get_build("team_infportal") || !(ns_get_build("team_advarmory") + ns_get_build("team_armory")) || !ns_get_build("team_armslab") || !comms())
 		return
-	if(get_team(index) !=1 || !is_user_alive(index) || ns_get_mask(index,MASK_DIGESTING) || ns_get_mask(index, MASK_TOPDOWN) || !comms())				
+	if(get_team(index) !=1 || !is_user_alive(index) || ns_get_mask(index,MASK_DIGESTING) || ns_get_mask(index, MASK_TOPDOWN))				
 		return
 	
-	new Carmor, Narmor, Marmor
+	new Carmor, Narmor, armorMult, Marmor
 	//Gets current armor
 	Carmor = get_user_armor(index)
-	
 	//Finds max armor
-	if(ns_get_mask(index, MASK_HEAVYARMOR))
-		Marmor = 200 + (comms() * 50)
+	
+	if(ns_get_mask(index, MASK_ARMOR3))
+		armorMult = 3
 	else
-		Marmor = 30 + (comms() * 20)
+		if(ns_get_mask(index, MASK_ARMOR2))
+			armorMult = 2
+		else
+			if(ns_get_mask(index, MASK_ARMOR1))
+				armorMult = 1
+	if(ns_get_mask(index, MASK_HEAVYARMOR))
+		Marmor = 200 + (armorMult * 50)//Marmor = 200 + (comms() * 50)
+	else
+		Marmor = 30 + (armorMult * 20)//Marmor = 30 + (comms() * 20)
 	if(ns_get_mask(index,MASK_JETPACK))
 		Marmor += 10
 	
@@ -961,7 +1012,7 @@ public do_armor(index)
 	}
 	else if(Narmor >= Marmor)
 	{
-		set_user_armor(index,Marmor)
+		set_user_armor(index, Marmor)
 		if(get_pcvar_num(effects) == 1)
 		{
 			emit_sound(index,CHAN_AUTO,"weapons/welderstop.wav",VOL_NORM,ATTN_NORM,0,PITCH_NORM)
@@ -976,62 +1027,77 @@ public supply(supply_type, Float:origin[3])
 		if(num_built_in_radius("team_armory", origin, 400) > 0 || num_built_in_radius("team_advarmory", origin, 400) > 0) //Do not spawn if armory near by.
 			return
 	
-	new ent, cost
+	new ent, Float:cost
 	switch(supply_type)
 	{
-		case 0: {ent = create_entity("item_health"); cost = 2;}
-		case 1: {ent = create_entity("item_genericammo"); cost = 1;}
-		case 2: {ent = create_entity("item_catalyst"); cost = 3;}
+		case 0: {ent = create_entity("item_health"); cost = 2.0;}
+		case 1: {ent = create_entity("item_genericammo"); cost = 1.0;}
+		case 2: {ent = create_entity("item_catalyst"); cost = 3.0;}
 	}
 	entity_set_origin(ent,origin)
 	if(free_res())
-		cost = 0		
-	if(weapon_res >= cost || ns_get_teamres(1) >= cost || get_pcvar_num(resupply_cost) == 0 || free_res())
+		cost = 0.0	
+	
+	if(get_pcvar_bool(resupply_use_wres))
 	{
-		DispatchSpawn(ent)
-		
-		if(weapon_res >= cost)
-			weapon_res -= cost
-		else
-			if(ns_get_teamres(1) >= cost)
-				res_subtract(cost)
-		if(get_pcvar_num(effects) == 1)
+		if(weapon_res >= cost * get_pcvar_float(resupply_cost) || supply_type == 2 && weapon_res >= 50.0 || !get_pcvar_float(resupply_cost) || free_res())
 		{
-			ns_fire_ps(ns_get_ps_id("PhaseInEffect"), origin)
-			emit_sound(ent,CHAN_AUTO,"misc/phasein.wav",VOL_NORM,ATTN_NORM,0,PITCH_NORM)
-		}
+			DispatchSpawn(ent)
 			
+			if(weapon_res >= cost && !free_res())
+				weapon_res -= cost * get_pcvar_float(resupply_cost)
+			if(get_pcvar_num(effects))
+			{
+				ns_fire_ps(ns_get_ps_id("PhaseInEffect"), origin)
+				emit_sound(ent,CHAN_AUTO,"misc/phasein.wav",VOL_NORM,ATTN_NORM,0,PITCH_NORM)
+			}
+		}
+	}
+	else 
+	{
+		if(ns_get_teamres(1) >= cost * get_pcvar_float(resupply_cost) || !get_pcvar_float(resupply_cost) || free_res())
+		{
+			DispatchSpawn(ent)
+			
+			if(ns_get_teamres(1) >= cost * get_pcvar_float(resupply_cost) && !free_res())
+				ns_add_teamres(1, (cost * get_pcvar_float(resupply_cost)) * -1 )
+			if(get_pcvar_num(effects))
+			{
+				ns_fire_ps(ns_get_ps_id("PhaseInEffect"), origin)
+				emit_sound(ent,CHAN_AUTO,"misc/phasein.wav",VOL_NORM,ATTN_NORM,0,PITCH_NORM)
+			}
+				
+		}
 	}
 }
 
 public client_spawn(id) 
 {
-	if ( !is_user_alive(id) ) 
-		return	//just double checking to prevent run time errors, this shouldn't happen
-
-	if(get_team(id) == 1)
-	{	
+	if (get_team(id) == 1) 
+	{
 		do_weapons(id)
 		do_pl_armor(id)
 	}
-	else 
-	if(get_pcvar_num(alien_buff_mode) > 0)//Alien buff, add res depending on how many hives the team has
+	else
 		alien_buff(id)
-		
 }
 public pfn_think(id)//For buildings
-{player_upgrades(id);}
+{
+	player_upgrades(id)
+}
 public client_PostThink(id)//For players
-{player_upgrades(id);}
+{
+	player_upgrades(id)
+}
 public player_upgrades(id)
 {
-	if (get_pcvar_num(weapons) == disabled || get_pcvar_num(player_comm) == 1 && get_pcvar_num(comm_mode) == 3)
+	if (get_pcvar_num(weapons) == disabled || get_pcvar_num(comm_mode) == weapons_only || get_pcvar_num(player_comm) && get_pcvar_num(comm_mode) == hybrid)
 		return
 	if(get_team(id) !=1 || !is_valid_ent(id))
 		return
 	if(!ns_round_in_progress())
 		return
-	if(ns_get_build("team_armslab") == 0)
+	if(!ns_get_build("team_armslab"))
 		return
 	switch(comms())
 	{
@@ -1064,22 +1130,21 @@ public player_upgrades(id)
 
 public do_weapons(id)
 {
-	if(get_pcvar_num(weapons) == disabled  || get_pcvar_num(weapons) == bots_only  && !is_user_bot(id))
+	if(!get_pcvar_num(weapons) || get_pcvar_num(weapons) == bots_only  && !is_user_bot(id) || !ns_get_build("team_armory") && !ns_get_build("team_advarmory") || !comms())
 		return
 		
 	//	New player spawn code by Noshadow and then modified by Random1 and CapITanJAC
 	//	33% Chance of Heavy Armor with a Proto
 	//	33% Chance of Jet Pack with a Proto
 	//	Random weapon given (No hard-coded cycle)
-	if(weapon_res >= 5 || ns_get_teamres(1) >= 5|| get_pcvar_num(weapons_cost) == 0)
-	{			
+	if(roundtime >= 60)
+		ns_give_item(id, "weapon_grenade")
+	//Welder
+	if(weapon_res >= 5 * get_pcvar_float(weapons_cost) || !get_pcvar_num(weapons_cost) || free_res())
+	{
 		ns_give_item(id, "weapon_welder")
-		if( get_pcvar_num(weapons_cost) > 0)
-			if(weapon_res >= 5)
-				weapon_res -= 5
-			else
-			if(ns_get_teamres(1) >= 5)
-				res_subtract(5)
+		if(get_pcvar_num(weapons_cost) && !free_res())
+			weapon_res -= 5 * get_pcvar_float(weapons_cost)
 	}
 	new wid
 	if(is_user_bot(id))
@@ -1089,97 +1154,82 @@ public do_weapons(id)
 	}
 	
 	//Adv. weapons ONLY with adv armory. --> Do same as w/ Proto tech
-	if(ns_get_build("team_advarmory") + ns_get_build("team_armory") == 0)
+	if(!(ns_get_build("team_advarmory") + ns_get_build("team_armory")))
 		return
 		
-	new rnumWeap = random(2)
-	if(ns_get_build("team_advarmory") > 0)
-		rnumWeap = random(4)
+	new rnumWeap
+	
+	if(ns_get_build("team_advarmory"))
+		if(weapon_res >= 100 * get_pcvar_float(weapons_cost))
+			rnumWeap = random_num(2,3)
+		else 
+			rnumWeap = random(4)
+	else
+		if(weapon_res >= 100 * get_pcvar_float(weapons_cost))
+			rnumWeap = 1
+		else
+			rnumWeap = random(2)
 	switch(rnumWeap)
 	{
-		//Case 0 is LMG
-		case 1: if( weapon_res >= 10 || ns_get_teamres(1) >= 10 || get_pcvar_num(weapons_cost) == disabled || free_res())
+		case 0: {}//YOU GET NOTHING, YOU LOSE; GOOD DAY SIR!
+		case 1: if( weapon_res >= 10 * get_pcvar_float(weapons_cost) || !get_pcvar_num(weapons_cost) || free_res())
 			{
 				ns_give_item(id, "weapon_shotgun")
-				if( get_pcvar_num(weapons_cost) == enabled && !free_res())
-					if(weapon_res >= 10)
-						weapon_res -= 10
-					else
-					if(ns_get_teamres(1) >= 10 && !free_res())
-						res_subtract(10)
+				if(get_pcvar_num(weapons_cost) && !free_res())
+					weapon_res -= 10 * get_pcvar_float(weapons_cost)
 			}
-		case 2: if( weapon_res >= 15 || ns_get_teamres(1) >=15 || get_pcvar_num(weapons_cost) == disabled || free_res())
+		case 2: if( weapon_res >= 15 * get_pcvar_float(weapons_cost) || !get_pcvar_num(weapons_cost) || free_res())
 			{
 				ns_give_item(id, "weapon_heavymachinegun")
-				if( get_pcvar_num(weapons_cost) == enabled && !free_res())
-					if(weapon_res >= 15)
-						weapon_res -= 15
-					else
-					if(ns_get_teamres(1) >= 15 && !free_res())
-						res_subtract(15)
+				if(get_pcvar_num(weapons_cost) && !free_res())
+					weapon_res -= 15 * get_pcvar_float(weapons_cost)
 			}
-			else
-				if( weapon_res >= 10 || ns_get_teamres(1) >= 10 || get_pcvar_num(weapons_cost) == disabled || free_res())
-				{
-					ns_give_item(id, "weapon_shotgun")
-					if( get_pcvar_num(weapons_cost) == enabled && !free_res())
-						if(weapon_res >= 10)
-							weapon_res -= 10
-						else
-						if(ns_get_teamres(1) >= 10 && !free_res())
-							res_subtract(10)
-				}
-		case 3: if( weapon_res >= 15 || ns_get_teamres(1) >= 15 || get_pcvar_num(weapons_cost) == disabled || free_res())
+		case 3: if( weapon_res >= 15 * get_pcvar_float(weapons_cost) || !get_pcvar_num(weapons_cost) || free_res())
 			{
 				ns_give_item(id, "weapon_grenadegun")
-				if( get_pcvar_num(weapons_cost) == enabled && !free_res())
-					if(weapon_res >= 15)
-						weapon_res -= 15
-					else
-					if(ns_get_teamres(1) >= 15 && !free_res())
-						res_subtract(15)
+				if(get_pcvar_num(weapons_cost) && !free_res())
+					weapon_res -= 15 * get_pcvar_float(weapons_cost)
 			}
-			else
-				if( weapon_res >= 10 || ns_get_teamres(1) >=10 || get_pcvar_num(weapons_cost) == disabled || free_res())
-				{
-					ns_give_item(id, "weapon_shotgun")
-					if( get_pcvar_num(weapons_cost) == enabled && !free_res())
-						if(weapon_res >= 10)
-							weapon_res -= 10
-						else
-						if(ns_get_teamres(1) >= 10 && !free_res())
-							res_subtract(10)
-				}
 	}
-	if(ns_get_build("team_prototypelab", 1) == 0) 
+	if(rnumWeap)
+	{//If weapon was givin
+		ns_give_item(id,"item_genericammo")
+		ns_give_item(id,"item_genericammo")
+		ns_give_item(id,"item_genericammo")
+	}
+	if(!ns_get_build("team_prototypelab", 1)) 
 		return
 	
 	new rnumProto = random(4)
-	if(comms() > 2  || get_pcvar_num(weapons_cost) == disabled || free_res())
+	if(get_pcvar_num(comm_mode) == weapons_only || comms() > 2  || !get_pcvar_num(weapons_cost) || free_res())
 		rnumProto = random_num(1,2)
 	switch(rnumProto)
 	{
-		case 1: if( weapon_res >= 10 || ns_get_teamres(1) >= 10 || get_pcvar_num(weapons_cost) == disabled || free_res() )
+		case 0:{}//YOU GET NOTHING, YOU LOSE; GOOD DAY SIR!
+		case 1: if( weapon_res >= 10 * get_pcvar_float(weapons_cost) || !get_pcvar_num(weapons_cost) || free_res())
 			{
 				ns_give_item(id, "item_jetpack")
-				if( get_pcvar_num(weapons_cost) == enabled || !free_res())
-					if(weapon_res >= 10)
-							weapon_res -= 10
-						else
-						if(ns_get_teamres(1) >= 10 && !free_res())
-							res_subtract(10)
+				if(get_pcvar_num(weapons_cost) && !free_res())
+					weapon_res -= 10 * get_pcvar_float(weapons_cost)
 			}
-		case 2: if( weapon_res >= 15 || ns_get_teamres(1) >= 15 || get_pcvar_num(weapons_cost) == disabled || free_res() )
+		case 2: if( weapon_res >= 15 * get_pcvar_float(weapons_cost) || !get_pcvar_num(weapons_cost) || free_res())
 			{
 				ns_give_item(id, "item_heavyarmor")
-				if(get_pcvar_num(weapons_cost) == enabled || !free_res())
-					if(weapon_res >= 15)
-							weapon_res -= 15
-						else
-						if(ns_get_teamres(1) >= 15 && !free_res())
-							res_subtract(15)
+				if(get_pcvar_num(weapons_cost) && !free_res())
+					weapon_res -= 15 * get_pcvar_float(weapons_cost)
 			}
 	}
+	new rnumMines = random(3)//33% at 1 comm chair, 50% at 2, 66% 3
+	rnumMines -= comms()
+	if(get_pcvar_num(comm_mode) == weapons_only || ns_get_teamres(1) >= 100 || weapon_res >= 50)
+		rnumMines = 0 //100%
+	if (rnumMines <= 0)
+			if( weapon_res >= 10 * get_pcvar_float(weapons_cost) || !get_pcvar_num(weapons_cost) || free_res())
+			{
+				ns_give_item(id, "weapon_mine")
+				if(get_pcvar_num(weapons_cost) && !free_res())
+					weapon_res -= 10 * get_pcvar_float(weapons_cost)
+			}
 }
 
 public do_pl_armor(id)
@@ -1209,36 +1259,38 @@ public do_pl_armor(id)
 		set_user_armor(id, 200 + (coms * 50))
 	ns_set_mask(id, masks[coms+2],1)
 }
-
+// Legacy Alien buff. (res on death)
 public alien_buff(id)
-{// Legacy Alien buff. (res on death)
-	if(get_pcvar_num(alien_buff_mode) != both || get_pcvar_num(alien_buff_mode) != old)
+{
+	if(get_pcvar_num(alien_buff_mode) != both && get_pcvar_num(alien_buff_mode) != old)
 		return
 	new hive_number = ns_get_build("team_hive", 1)
-	new Float: ammount
+	new Float: ammount = get_pcvar_float(buff_3hive)
 	switch(hive_number)
 		{
 			//No 0 hives
 			case 1: ammount = get_pcvar_float(buff_1hive)
 			case 2: ammount = get_pcvar_float(buff_2hive)
-			case 3: ammount = get_pcvar_float(buff_3hive)
 		}
 	ns_add_res(id, ammount)
 }
 
 public alien_buff2()
 {//New Alien buff
-	if(get_pcvar_num(alien_buff_mode) == 0 || get_pcvar_num(alien_buff_mode) == old)	
+	if(!get_pcvar_num(alien_buff_mode) || get_pcvar_num(alien_buff_mode) == old)	
 			return
 	for(new id;id < get_maxplayers(); id++)
 	{
 		if(get_team(id) == 1)
 			continue
 			
-		if(get_pcvar_num(alien_buff_mode) == bots_only && !is_user_bot(id))
+		if(get_pcvar_num(alien_buff_mode) == bots_only || get_pcvar_num(alien_buff_mode) == bot_gorges_only && !is_user_bot(id) )
 			continue
 			
-		if(ns_get_res(id) > 50.0 && ns_get_class(id) != CLASS_GORGE || ns_get_res(id) > 90.0)
+		if(get_pcvar_num(alien_buff_mode) == gorges_only || get_pcvar_num(alien_buff_mode) == bot_gorges_only && ns_get_class(id) != CLASS_GORGE)
+			continue
+		
+		if(ns_get_res(id) > 50.0 && ns_get_class(id) != CLASS_GORGE || ns_get_class(id) == CLASS_GORGE && ns_get_res(id) > 90.0)
 			continue
 			
 		ns_add_res(id,(1.0 / ns_get_build("team_hive")))
@@ -1265,7 +1317,7 @@ public client_changeclass(id, nclass, oclass)	//lets hope this actually detects 
 	{
 		temp_disable = false
 		set_pcvar_num(player_comm, disabled)
-		set_pcvar_num(upgrade, CVAR_UPGRADE_TFS)
+		set_pcvar_num(upgrade, CVAR_UPGRADE)
 		set_pcvar_num(electrify, CVAR_ELECTRIFY_BUILDINGS)
 		set_pcvar_num(weapons, CVAR_WEAPONS)
 		set_pcvar_num(resupply, CVAR_RESUPPLY)
@@ -1288,7 +1340,7 @@ public message_display()
 	format(message, MESSAGELENGTH, "Weapon Resources: %.1f", weapon_res)
 	while(player < get_maxplayers())
 	{
-		if(!is_user_bot(player) && get_pcvar_num(weapons_cost) > 0)
+		if(!is_user_bot(player) && get_pcvar_bool(weapons_cost) && !get_pcvar_bool(player_comm))
 			if(get_team(player) == 1 && !ns_get_mask(player, MASK_DIGESTING))//Marines
 			{
 				set_hudmessage(0, 175, 210, 0.3, 0.03, 0, 0.0, 12.0, 0.0, 0.0, 4) 
@@ -1389,6 +1441,17 @@ spawn_building(classname[],team_id,Float:origin[3])
 { 
 	new ent = create_entity(classname)
 	entity_set_origin(ent,origin)
+	entity_set_float(ent, EV_FL_fuser1, 0.0)
+	entity_set_float(ent, EV_FL_fuser2, 500.0)
+	entity_set_int(ent, EV_INT_team, team_id)
+	DispatchSpawn(ent)
+	if(equali(classname, "team_armslab"))
+		ns_set_mask(ent, MASK_SELECTABLE, 0)
+	new player_id
+	while(get_team(player_id) != 1)
+		player_id = random(get_maxplayers())
+	ns_set_struct_owner(ent, player_id)//Random Building owner
+	
 	if(get_pcvar_num(effects) == 1)
 	{
 		if(!equali(classname, "team_command"))
@@ -1402,19 +1465,11 @@ spawn_building(classname[],team_id,Float:origin[3])
 			angle[2] = z
 			entity_set_vector(ent,EV_VEC_angles, angle)
 		}
-		ns_fire_ps(ns_get_ps_id("PhaseInEffect"), origin)
+		new Float:PSorigin[3]; PSorigin[0] = origin[0];PSorigin[1] = origin[1];PSorigin[2] = origin[2] + 50.0;
+		ns_fire_ps(ns_get_ps_id("PhaseInEffect"), PSorigin)
 		emit_sound(ent,CHAN_AUTO,"misc/phasein.wav",VOL_NORM,ATTN_NORM,0,PITCH_NORM)
 	}
-	DispatchSpawn(ent)
-	set_pev(ent,pev_fuser1,0)
-	set_pev(ent,pev_fuser2,500)
-	set_pev(ent,pev_team,team_id)
-	if(equali(classname, "team_armslab"))
-		ns_set_mask(ent, MASK_SELECTABLE, 0)
-	new player_id
-	while(get_team(player_id) != 1)
-		player_id = random(get_maxplayers())
-	ns_set_struct_owner(ent, player_id)//Random Building owner
+	
 	return// PLUGIN_HANDLED 
 }
 
@@ -1552,10 +1607,10 @@ Util_PlayAnimation(index, sequence, Float: framerate = 1.0)
 	if(get_pcvar_num(effects) == disabled)
 		return
 	
-	entity_set_float(index, EV_FL_animtime, get_gametime()); 
-	entity_set_float(index, EV_FL_framerate,  framerate); 
-	entity_set_float(index, EV_FL_frame, 0.0); 
-	entity_set_int(index, EV_INT_sequence, sequence); 
+	entity_set_float(index, EV_FL_animtime, get_gametime())
+	entity_set_float(index, EV_FL_framerate,  framerate)
+	entity_set_float(index, EV_FL_frame, 0.0) 
+	entity_set_int(index, EV_INT_sequence, sequence)
 } 
 
 //http://hpb-bot.bots-united.com/botmans_forum/2%20Bot%20developer's%20discussions/3807.txt
@@ -1578,7 +1633,7 @@ public admin_load(id,level,cid)
 
 public start_vote()
 {	
-	new menu = menu_create("\rDo You Want The AI Commander?", "menu_handler")
+	new menu = menu_create("\rDo You Want a Bot Commander?", "menu_handler")
 	menu_additem(menu, "\wYes", "1", 0)
 	menu_additem(menu, "\wNo", "2", 0)
 	menu_addblank(menu, 0)
@@ -1637,14 +1692,19 @@ public menu_handler(id, menu, item)
 
 public finish_vote()
 {
-	if(choises[2] > choises[1])
+	if(choises[1] > choises[2])
 	{
-		client_print(0, print_chat, "AI Commander ^"OFF^" won with %d votes", choises[2])
-		server_cmd("amx_commai_comm_mode 1");
+		client_print(0, print_chat, "Bot Commander ^"ON^" won with %d votes", choises[1])
+		server_cmd("evobot commandermode always")
 	}
 	else
 	{
-		client_print(0, print_chat, "AI Commander ^"ON^" won with %d votes", choises[1])
-		server_cmd("amx_commai_comm_mode 3");
+		server_cmd("evobot commandermode never")
 	}
 }  
+
+public GameDesc( ) 
+{ 
+	forward_return(FMV_STRING, g_ModName) 
+	return FMRES_SUPERCEDE
+}
