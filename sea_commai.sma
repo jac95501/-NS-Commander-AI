@@ -419,7 +419,7 @@ public res_tick()
 	new Float:marines; marines += (get_playersnum()/2)
 	//0.01 bonus weapon res every 4 seconds per marine (if under 100)
 	if(weapon_res <= 100.0 && !get_pcvar_bool(resupply_cost))
-		weapon_res += (0.01 * floatround(marines))
+		weapon_res += (0.1 * floatround(marines))
 	if(get_pcvar_num(player_comm))
 		return
 	if(roundtime >= 1800)
